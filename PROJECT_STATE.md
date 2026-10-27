@@ -7,7 +7,7 @@
 - **سیستم‌عامل هدف فقط Linux است**؛ معماری‌های amd64 و arm64. رفع ایرادهای مخصوص Windows جزو هدف پروژه نیست.
 - زبان اجرای محصول Go است؛ Python daemon یا Python runtime نباید وابستگی محصول باشد.
 - باینری پیش‌فرض با `CGO_ENABLED=0` ساخته شود. ابزار سیستمی `nft` برای اعمال فایروال لازم است؛ فرمان‌های مجاز ترمینال نیز باید روی میزبان موجود باشند.
-- نام محصول Night Watcher و مقصد updater برابر `syklonAK/night-watcher` است.
+- نام محصول Night Watcher و مخزن منتشرشده **`syklonAK/night-watcher`** است (۲۰۲۶-۱۰-۲۸؛ از mahdi-byte64 به اکانت فعلی تغییر کرد).
 - هفت ماژول Edge باید به هسته و پنل موجود متصل باشند، نه صرفاً یک سرویس نمایشی جداگانه.
 - این فایل پس از تغییر معماری، رفتار، آزمون‌ها یا محدودیت‌ها به‌روز شود؛ کار تکمیل‌شده و کار تأییدنشده جدا ثبت شوند.
 
@@ -25,7 +25,9 @@
 | تنظیمات Linux | `/etc/night-watcher`؛ فایل Edge: `edge.json` |
 | مسیر نصب باینری | `/usr/local/bin/night-watcher` |
 
-در بررسی قبلی این پوشه مخزن Git نبود؛ commit، push یا انتشار انجام نشده است. LICENSE و NOTICE برای حفظ انتساب پروژهٔ پایه نگه داشته شده‌اند. اسکریپت‌های Python در ریشهٔ `E:/nw` ابزارهای یک‌بارمصرف ویرایش بوده‌اند و بخشی از runtime محصول نیستند؛ بازاجرای آن‌ها ایمن یا idempotent فرض نشود.
+**انتشار (۲۰۲۶-۱۰-۲۸):** مخزن `syklonAK/night-watcher` ساخته و عمومی شد؛ branch `main` و tag `v1.31.1` push شدند. module path کل سورس (۲۱۰ فایل) از `mahdi-byte64/night-watcher` به `syklonAK/night-watcher` تغییر کرد و `RepoOwner`، installer/updater/CI به repo جدید اشاره می‌کنند. Release workflow تست‌ها را اجرا و assetهای `night-watcher_linux_amd64.tar.gz`، `night-watcher_linux_arm64.tar.gz`، `install.sh` و `SHA256SUMS` را منتشر کرد. CI روی Ubuntu (شامل race) موفق. LICENSE و NOTICE برای حفظ انتساب پروژهٔ پایه نگه داشته شده‌اند. اسکریپت‌های Python در ریشهٔ `E:/nw` ابزارهای یک‌بارمصرف ویرایش بوده‌اند و بخشی از runtime محصول نیستند؛ بازاجرای آن‌ها ایمن یا idempotent فرض نشود.
+
+نصب روی سرور: `bash <(curl -fsSL https://raw.githubusercontent.com/syklonAK/night-watcher/main/install.sh)` — آپدیت از منوی CLI (گزینهٔ ۹، با rollback خودکار) و حذف کامل با گزینهٔ ۱۰ یا `make uninstall`.
 
 راهنمای عملیاتی و قرارداد دقیق تنظیمات در [docs/native-edge.md](docs/native-edge.md) و نمونهٔ تنظیمات در [examples/edge.json](examples/edge.json) است.
 
@@ -72,7 +74,7 @@
 | `internal/app/` | نام محصول/مخزن/مسیرها و atomic write |
 | `internal/packet/engine/socket/` | abstraction capture و backend بومی Linux AF_PACKET |
 | `install.sh`, `Makefile`, updater | نام‌ها و build پیش‌فرض CGO=0 |
-| `.github/workflows/ci.yml` | تست Ubuntu، race و build لینوکس amd64/arm64؛ نتیجهٔ اجرای CI هنوز موجود نیست |
+| `.github/workflows/ci.yml` | تست Ubuntu (شامل race)، build لینوکس amd64/arm64 — موفق 2026-10-28 |
 | `.github/workflows/release.yml` | نام‌گذاری assetهای انتشار Night Watcher |
 
 backend پیش‌فرض packet از AF_PACKET استفاده می‌کند و به libpcap/C compiler نیاز ندارد. اجرای آن `CAP_NET_RAW` یا root لازم دارد. backend قدیمی فقط با tag `pcap` و CGO فعال قابل ساخت است. رفتار واقعی AF_PACKET روی Linux هنوز باید آزموده شود.
@@ -121,7 +123,8 @@ mutationهای Edge نیازمند same-origin و JSON هستند. backup کام
 | تست‌های manage (backup shell scope, path traversal) و telegram | موفق 2026-10-28 |
 | go vet روی بسته‌های تغییرکرده | بدون خطا 2026-10-28 |
 | syntax JavaScript صفحات Edge و dashboard | `node --check` موفق 2026-10-28 |
-| تست کامل Linux، race | هنوز نتیجهٔ اجرای تأییدشده ثبت نشده |
+| `go test ./... -timeout 20m` روی Linux (CI Ubuntu) | موفق 2026-10-28 (run 40597033911) |
+| `go test -race ./internal/edge ./internal/webui ./internal/socks` روی Linux CI | موفق 2026-10-28 |
 | تست واقعی nft، AF_PACKET، PTY و PMTU روی Linux | انجام نشده؛ compile یا mock جایگزین این تست‌ها نیست |
 | بررسی بصری صفحه در مرورگر | انجام نشده؛ اتصال Chrome فراهم نشد |
 
@@ -137,9 +140,9 @@ mutationهای Edge نیازمند same-origin و JSON هستند. backup کام
 
 ## کارهای باقی‌مانده، به ترتیب اولویت
 
-1. روی Linux تمام تست‌ها و race را اجرا کنید؛ سپس nft/kill switch/DNS IPv4+IPv6، PTY revocation و AF_PACKET را در میزبان یا namespace ایزوله آزمایش کنید. روی میزبان فعالِ راه‌دور بدون راه بازیابی فایروال آزمایش نکنید. این کار به محیط Linux (میزبان، WSL یا container) نیاز دارد که روی Windows فعلی در دسترس نیست.
+1. nft/kill switch/DNS IPv4+IPv6، PTY revocation و AF_PACKET را در میزبان یا namespace ایزولهٔ Linux آزمایش کنید — تست‌های CI ubuntu این موارد را با mock می‌پوشانند، نه رفتار واقعی را. روی میزبان فعالِ راه‌دور بدون راه بازیابی فایروال آزمایش نکنید.
 2. رفتار reload/SIGHUP/SIGTERM در چند process روی Linux و بررسی بصری صفحه‌های پنل در مرورگر تأیید شود.
-3. پس از تأیید موارد بالا، نسخهٔ release و بستهٔ تحویل تعیین شود. هیچ release یا deploy واقعی انجام نشده است.
+3. نصب واقعی روی یک VPS ایران با `install.sh` و به‌روزرسانی از منوی CLI آزمایش شود؛ سپس نسخه‌های بعدی و CHANGELOG منتشر شوند.
 
 ## دستورهای مرجع برای Linux
 
