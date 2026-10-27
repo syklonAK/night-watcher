@@ -1,0 +1,257 @@
+package manage
+
+// WireGuard tunnels are created differently from the reverse tunnels: a server
+// generates a fresh exit-node config (and hands out a client .conf), and a
+// client is given a WireGuard config to parse. Both render a [wireguard] TOML
+// section, write the unit, and start the service — the same lifecycle every
+// other tunnel uses for delete/restart/logs/status.
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/syklonAK/night-watcher/config"
+	"github.com/syklonAK/night-watcher/internal/app"
+	"github.com/syklonAK/night-watcher/internal/wireguard"
+)
+
+// CreateWireGuardServer generates a WireGuard exit node listening on listenPort,
+// starts it, and returns a ready-to-paste client config pointing at
+// endpointHost:listenPort.
+func CreateWireGuardServer(name string, listenPort int, endpointHost, dns, egress string) (clientConfig string, err error) {
+	name = strings.TrimSpace(name)
+	if !validName(name) {
+		return "", fmt.Errorf("invalid tunnel name %q — use letters, digits, dots, dashes (max 40)", name)
+	}
+	if _, ok := Find(name); ok {
+		return "", fmt.Errorf("a tunnel named %q already exists", name)
+	}
+	if listenPort < 1 || listenPort > 65535 {
+		return "", fmt.Errorf("invalid listen port %d", listenPort)
+	}
+	endpointHost = strings.Trim(strings.TrimSpace(endpointHost), "[]")
+	if endpointHost == "" {
+		return "", fmt.Errorf("the server's public IP or domain is required — the client config needs it as the endpoint")
+	}
+
+	gen, err := wireguard.GenerateExitServer(listenPort, endpointHost, dns)
+	if err != nil {
+		return "", err
+	}
+	toml := wgRenderServer(name, gen.ServerPrivateKey, listenPort, gen.Address, strings.TrimSpace(egress), gen.Peers)
+	if _, err := saveGeneratedTunnel(name, toml); err != nil {
+		return "", err
+	}
+	return gen.ClientConfigText, nil
+}
+
+// CreateWireGuardClient brings up a userspace WireGuard client from a pasted
+// wg-quick config and exposes a SOCKS5 proxy on socksPort.
+func CreateWireGuardClient(name, wgConfigText, socksBind string, socksPort int) error {
+	name = strings.TrimSpace(name)
+	if !validName(name) {
+		return fmt.Errorf("invalid tunnel name %q — use letters, digits, dots, dashes (max 40)", name)
+	}
+	if _, ok := Find(name); ok {
+		return fmt.Errorf("a tunnel named %q already exists", name)
+	}
+	if socksPort < 1 || socksPort > 65535 {
+		return fmt.Errorf("invalid SOCKS5 port %d", socksPort)
+	}
+	pc, err := wireguard.ParseClientConfig(wgConfigText)
+	if err != nil {
+		return fmt.Errorf("the WireGuard config could not be read: %w", err)
+	}
+	socksBind = strings.TrimSpace(socksBind)
+	if socksBind == "" {
+		socksBind = "127.0.0.1"
+	}
+	toml := wgRenderClient(name, pc, socksBind, socksPort)
+	_, err = saveGeneratedTunnel(name, toml)
+	return err
+}
+
+// WGEdit is a WireGuard tunnel's editable config for the panel's edit form.
+type WGEdit struct {
+	Role       string `json:"role"`
+	ListenPort int    `json:"listenPort"`
+	Egress     string `json:"egress"`
+	SocksBind  string `json:"socksBind"`
+	SocksPort  int    `json:"socksPort"`
+}
+
+// WireGuardForEdit loads a WireGuard tunnel's editable fields. A server's keys,
+// address and peers are not returned — they are preserved across an edit and
+// never surfaced for editing, so changing a server cannot break the clients that
+// already hold its config.
+func WireGuardForEdit(name string) (WGEdit, error) {
+	cfg, err := LoadTunnelConfig(name)
+	if err != nil {
+		return WGEdit{}, err
+	}
+	w := cfg.WireGuard
+	if w.Role == "" {
+		return WGEdit{}, fmt.Errorf("%q is not a WireGuard tunnel", name)
+	}
+	e := WGEdit{Role: w.Role}
+	if w.Role == "server" {
+		e.ListenPort = w.ListenPort
+		e.Egress = w.Egress
+	} else {
+		e.SocksBind = w.SocksBind
+		e.SocksPort = w.SocksPort
+	}
+	return e, nil
+}
+
+// UpdateWireGuardServer changes a WireGuard server's listen port and NAT egress
+// while preserving its keypair, address and peers, so existing clients keep
+// working (they only need their Endpoint port updated if the port changed).
+func UpdateWireGuardServer(name string, listenPort int, egress string) error {
+	name = strings.TrimSpace(name)
+	cfg, err := LoadTunnelConfig(name)
+	if err != nil {
+		return err
+	}
+	w := cfg.WireGuard
+	if w.Role != "server" {
+		return fmt.Errorf("%q is not a WireGuard server", name)
+	}
+	if listenPort < 1 || listenPort > 65535 {
+		return fmt.Errorf("invalid listen port %d", listenPort)
+	}
+	toml := wgRenderServer(name, w.PrivateKey, listenPort, w.Address, strings.TrimSpace(egress), w.Peers)
+	_, err = saveGeneratedTunnel(name, toml)
+	return err
+}
+
+// UpdateWireGuardClient changes a WireGuard client's SOCKS5 binding and,
+// optionally, its whole tunnel config. An empty wgConfigText keeps the current
+// config so a SOCKS-only edit does not require re-pasting it.
+func UpdateWireGuardClient(name, wgConfigText, socksBind string, socksPort int) error {
+	name = strings.TrimSpace(name)
+	cfg, err := LoadTunnelConfig(name)
+	if err != nil {
+		return err
+	}
+	w := cfg.WireGuard
+	if w.Role != "client" {
+		return fmt.Errorf("%q is not a WireGuard client", name)
+	}
+	if socksPort < 1 || socksPort > 65535 {
+		return fmt.Errorf("invalid SOCKS5 port %d", socksPort)
+	}
+	socksBind = strings.TrimSpace(socksBind)
+	if socksBind == "" {
+		socksBind = "127.0.0.1"
+	}
+	var pc *wireguard.ParsedClient
+	if strings.TrimSpace(wgConfigText) != "" {
+		pc, err = wireguard.ParseClientConfig(wgConfigText)
+		if err != nil {
+			return fmt.Errorf("the WireGuard config could not be read: %w", err)
+		}
+	} else {
+		// Keep the current config, changing only the SOCKS binding.
+		pc = &wireguard.ParsedClient{
+			PrivateKey: w.ClientPrivateKey, Address: w.ClientAddress, DNS: w.DNS, MTU: w.MTU,
+			PeerPublicKey: w.PeerPublicKey, PresharedKey: w.PresharedKey, Endpoint: w.Endpoint,
+			AllowedIPs: w.AllowedIPs, Keepalive: w.Keepalive,
+			Jc: w.Jc, Jmin: w.Jmin, Jmax: w.Jmax, S1: w.S1, S2: w.S2, H1: w.H1, H2: w.H2, H3: w.H3, H4: w.H4,
+		}
+	}
+	toml := wgRenderClient(name, pc, socksBind, socksPort)
+	_, err = saveGeneratedTunnel(name, toml)
+	return err
+}
+
+// saveGeneratedTunnel writes the config and unit and starts the service, the same way
+// TunnelSpec.Save does for the reverse tunnels.
+func saveGeneratedTunnel(name, tomlText string) (string, error) {
+	if err := os.MkdirAll(app.ConfigDir, 0755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(app.ConfigPath(name), []byte(tomlText), 0644); err != nil {
+		return "", err
+	}
+	if err := writeUnit(name); err != nil {
+		return "", err
+	}
+	if err := DaemonReload(); err != nil {
+		return "", err
+	}
+	service := app.ServiceName(name)
+	// On a fresh create the service is not up yet, so start it; on an edit it is
+	// already running with the old config, so restart it to load the new one.
+	if IsActive(service) {
+		if err := RestartService(service); err != nil {
+			return service, err
+		}
+	} else if err := StartService(service); err != nil {
+		return service, err
+	}
+	return service, nil
+}
+
+func wgRenderServer(name, priv string, listenPort int, address, egress string, peers []config.WGPeer) string {
+	var b strings.Builder
+	b.WriteString("# Generated by night-watcher — do not edit while the service is running.\n")
+	fmt.Fprintf(&b, "# name = %q\n\n", name)
+	b.WriteString("[wireguard]\n")
+	b.WriteString("role = \"server\"\n")
+	fmt.Fprintf(&b, "private_key = %q\n", priv)
+	fmt.Fprintf(&b, "listen_port = %d\n", listenPort)
+	fmt.Fprintf(&b, "address = %q\n", address)
+	if egress != "" {
+		fmt.Fprintf(&b, "egress = %q\n", egress)
+	}
+	for _, p := range peers {
+		b.WriteString("\n[[wireguard.peers]]\n")
+		fmt.Fprintf(&b, "public_key = %q\n", p.PublicKey)
+		fmt.Fprintf(&b, "allowed_ips = %q\n", p.AllowedIPs)
+	}
+	return b.String()
+}
+
+func wgRenderClient(name string, pc *wireguard.ParsedClient, socksBind string, socksPort int) string {
+	var b strings.Builder
+	b.WriteString("# Generated by night-watcher — do not edit while the service is running.\n")
+	fmt.Fprintf(&b, "# name = %q\n\n", name)
+	b.WriteString("[wireguard]\n")
+	b.WriteString("role = \"client\"\n")
+	fmt.Fprintf(&b, "client_private_key = %q\n", pc.PrivateKey)
+	fmt.Fprintf(&b, "client_address = %q\n", pc.Address)
+	if pc.DNS != "" {
+		fmt.Fprintf(&b, "dns = %q\n", pc.DNS)
+	}
+	if pc.MTU > 0 {
+		fmt.Fprintf(&b, "mtu = %d\n", pc.MTU)
+	}
+	fmt.Fprintf(&b, "peer_public_key = %q\n", pc.PeerPublicKey)
+	if pc.PresharedKey != "" {
+		fmt.Fprintf(&b, "preshared_key = %q\n", pc.PresharedKey)
+	}
+	fmt.Fprintf(&b, "endpoint = %q\n", pc.Endpoint)
+	if pc.AllowedIPs != "" {
+		fmt.Fprintf(&b, "allowed_ips = %q\n", pc.AllowedIPs)
+	}
+	if pc.Keepalive > 0 {
+		fmt.Fprintf(&b, "keepalive = %d\n", pc.Keepalive)
+	}
+	// AmneziaWG obfuscation, emitted only when the pasted config carried it.
+	if pc.Jc > 0 {
+		fmt.Fprintf(&b, "jc = %d\n", pc.Jc)
+		fmt.Fprintf(&b, "jmin = %d\n", pc.Jmin)
+		fmt.Fprintf(&b, "jmax = %d\n", pc.Jmax)
+		fmt.Fprintf(&b, "s1 = %d\n", pc.S1)
+		fmt.Fprintf(&b, "s2 = %d\n", pc.S2)
+		fmt.Fprintf(&b, "h1 = %d\n", pc.H1)
+		fmt.Fprintf(&b, "h2 = %d\n", pc.H2)
+		fmt.Fprintf(&b, "h3 = %d\n", pc.H3)
+		fmt.Fprintf(&b, "h4 = %d\n", pc.H4)
+	}
+	fmt.Fprintf(&b, "socks_bind = %q\n", socksBind)
+	fmt.Fprintf(&b, "socks_port = %d\n", socksPort)
+	return b.String()
+}

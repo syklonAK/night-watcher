@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "enabled": false,
+  "default": "egress",
+  "rules": [
+    {"domain": "*.internal.example", "action": "direct"},
+    {"cidr": "169.254.0.0/16", "action": "block"}
+  ],
+  "bypass": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7"],
+  "upstreams": [
+    {"name": "exit-a", "group": "egress", "address": "127.0.0.1:1080", "kind": "socks5", "weight": 100, "probe": {"kind": "tcp", "target": "127.0.0.1:1080", "interval_seconds": 5, "timeout_seconds": 2, "failures": 3, "successes": 2}},
+    {"name": "service-a", "group": "service", "address": "127.0.0.1:13701", "kind": "forward", "weight": 100, "probe": {"kind": "tcp", "target": "127.0.0.1:13701", "interval_seconds": 5, "timeout_seconds": 2, "failures": 3, "successes": 2}}
+  ],
+  "listeners": [
+    {"name": "tls-entry", "address": "0.0.0.0:8443", "mode": "tls-passthrough", "default_group": "service", "routes": [{"host": "*.example.com", "group": "service"}]}
+  ],
+  "detect": {"public_ipv4_url": "https://api.ipify.org", "public_ipv6_url": "https://api6.ipify.org", "path_target": ""},
+  "firewall": {"enabled": false, "kill_switch": false, "prevent_dns_leaks": false, "block_forward_loops": false, "egress_interfaces": [], "allowed_destinations": [], "dns_servers": [], "isolated_tcp_ports": []},
+  "shell": {"enabled": false, "uid": 0, "gid": 0, "directory": "", "commands": {}, "timeout_seconds": 0, "idle_seconds": 0, "max_sessions": 0}
+}

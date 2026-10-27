@@ -1,0 +1,17 @@
+name: Native edge checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: CGO_ENABLED=0 go test ./... -timeout 10m
+      - run: go test -race ./internal/edge ./internal/webui ./internal/socks -timeout 5m
+      - run: CGO_ENABLED=0 go build -v -o night-watcher main.go
+      - run: CGO_ENABLED=0 GOARCH=arm64 go build -o night-watcher-arm64 main.go

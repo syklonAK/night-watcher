@@ -1,0 +1,585 @@
+package manage
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/syklonAK/night-watcher/internal/app"
+)
+
+// TunnelSpec is the full description of a tunnel used to render a TOML config.
+type TunnelSpec struct {
+	Name      string
+	Role      string // "server" (Iran/edge that exposes ports) or "client" (kharej/origin)
+	Transport string // tcp, tcpmux, udp, kcp, ws, wss, wsmux, wssmux
+
+	// Preset is the performance profile every tuning field was filled from:
+	// balance, turbo or aggressive. Empty means the values were set by hand or
+	// by a version that predates presets — either way they are left untouched.
+	Preset string
+
+	BindAddr   string   // server: listen address for the tunnel control channel
+	RemoteAddr string   // client: address of the server tunnel port
+	Token      string   // shared secret
+	Ports      []string // server: exposed/forwarded ports
+
+	// LoadBalance spreads data connections across FallbackAddrs instead of
+	// only using them when the primary fails. Every address must reach the
+	// same server.
+	LoadBalance bool
+
+	// HealthFailover scores every address (primary + FallbackAddrs) on a timer
+	// and keeps the tunnel on the healthiest exit. Mutually exclusive with
+	// LoadBalance. Client only.
+	HealthFailover bool
+
+	// FallbackAddrs are extra server addresses a client tries, in order, when
+	// the primary one cannot be reached — a second IP, a different port, or a
+	// CDN edge. This keeps the tunnel up when one address gets filtered.
+	FallbackAddrs []string
+
+	Nodelay        bool
+	Heartbeat      int
+	KeepAlive      int
+	ChannelSize    int
+	ConnectionPool int
+	AggressivePool bool
+	AcceptUDP      bool
+	LogLevel       string
+	// LogFormat is "" for human-readable output or "json" for machine parsing.
+	LogFormat string
+
+	// SMUX / multiplexed transports
+	MuxCon          int
+	MuxVersion      int
+	MuxFrameSize    int
+	MuxRecvBuffer   int
+	MuxStreamBuffer int
+
+	// KCP transport (reliable ARQ over UDP). Filled from the preset; only
+	// written to the config when the transport is kcp.
+	KCPMTU          int
+	KCPInterval     int // ARQ tick in milliseconds — lower reacts faster, costs CPU
+	KCPResend       int // fast-retransmit threshold in duplicate ACKs
+	KCPNoDelay      int // 1 enables the low-latency ARQ mode
+	KCPNoCongestion int // 1 disables KCP's own congestion window
+	KCPSndWnd       int // send window in packets
+	KCPRcvWnd       int // receive window in packets
+	KCPAckNoDelay   bool
+	// FEC: every KCPDataShards packets carry KCPParityShards parity packets, so
+	// that many losses are repaired without waiting for a retransmit. 0 = off.
+	KCPDataShards   int
+	KCPParityShards int
+
+	// Spoof transport (raw IP with a forged source). Filled only when the
+	// transport is spoof; see config.SpoofConfig.
+	SpoofProfile   string   // "udp" (default), "icmp" or "tcp" — both directions
+	SpoofUplink    string   // client→server profile override (empty = symmetric)
+	SpoofDownlink  string   // server→client profile override (empty = symmetric)
+	SpoofSrcIP     string   // forged source address, empty to keep the real one
+	SpoofSrcPool   []string // forged sources to rotate through per session
+	SpoofPeerIP    string   // peer's real IPv4; required on the server
+	SpoofDstIP     string   // forged destination in the cosmetic shim (unused by udp)
+	SpoofInterface string   // egress device to pin the raw socket to
+	SpoofPipe      bool     // WireGuard-pipe mode instead of a KCP tunnel
+	SpoofPipeAddr  string   // this host's WireGuard UDP endpoint
+	SpoofSockBuf   int      // SO_SNDBUF/SO_RCVBUF for the carrier's sockets (bytes)
+	SpoofPeerSrcIP string   // expected forged source of inbound packets
+	SpoofICMPReply bool     // icmp/icmpv6: client requests, server replies
+	SpoofMTU       int      // fragment sends larger than this (bytes)
+	// DPI-evasion obfuscation knobs (all optional, default off).
+	SpoofTTLJitter   bool // vary IP TTL per packet
+	SpoofRandomDSCP  bool // vary IP DSCP per packet
+	SpoofShufflePort bool // randomise L4 source port per packet
+	SpoofPortMin     int  // source-port shuffle low bound
+	SpoofPortMax     int  // source-port shuffle high bound
+	SpoofPadding     bool // append self-describing random padding
+	SpoofPaddingMax  int  // most padding bytes per frame
+	SpoofFakeTLS     bool // prepend a fake TLS record header (tcp)
+
+	// PCK transport (KCP inside hand-built TCP through a packet socket). Filled
+	// only when the transport is pck; see config.PckConfig. All optional — the
+	// carrier discovers its own egress and defaults to an ordinary-looking flow.
+	PckInterface  string   // egress device to pin the packet socket to
+	PckGatewayMAC string   // next-hop MAC override (empty = read from neigh table)
+	PckFlags      []string // tcpdump-style TCP flag cycle (e.g. ["PA"]), empty = PSH+ACK
+
+	// Throughput / latency tuning
+	MSS      int // TCP max segment size (0 = auto)
+	SoRcvBuf int // per-socket receive buffer (bytes)
+	SoSndBuf int // per-socket send buffer (bytes)
+
+	// ProxyProtocol makes the server prepend a PROXY protocol v2 header to
+	// every forwarded connection, so the service behind the tunnel sees the
+	// real client IP instead of the tunnel's. Panels need this to enforce
+	// per-user device/IP limits. The backend must be configured to expect it.
+	ProxyProtocol bool
+
+	// Obfs is the frp/rathole DPI-obfuscation mode ("noise" or "tls"), and
+	// TLSSni the SNI the tls mode presents. Ignored by the other transports.
+	Obfs   string
+	TLSSni string
+
+	// MaxConnections caps simultaneous forwarded connections (0 = unlimited).
+	MaxConnections int
+	// BandwidthMbps caps total tunnel throughput in Mbit/s (0 = unlimited).
+	BandwidthMbps int
+
+	// Sniffer web panel
+	Sniffer bool
+	WebPort int
+	// WebBind is the address the sniffer/monitor page listens on. The page has
+	// no authentication, so 127.0.0.1 (reach it over SSH) is the safe value;
+	// empty keeps the historical all-interfaces bind.
+	WebBind string
+
+	// TLS (server, wss/wssmux only)
+	TLSCert string
+	TLSKey  string
+	// ACMEDomain, when set, makes the tunnel obtain a Let's Encrypt certificate
+	// for that domain instead of using the generated self-signed one.
+	ACMEDomain string
+	ACMEEmail  string
+
+	// Edge/CDN IP override (client, websocket transports only)
+	EdgeIP string
+	// SimpleAuth authorises a wss tunnel by the raw token, for a server behind
+	// a TLS-terminating proxy like NGINX. Off by default. See config.SimpleAuth.
+	SimpleAuth bool
+	// Proxy is the optional socks5:// or http:// URL the client reaches the
+	// tunnel server through. Empty means dial it directly.
+	Proxy string
+	// LocalAddr, Interface and SOMark decide which way out of a multi-homed
+	// machine the tunnel leaves by. All optional; empty and zero mean "let the
+	// kernel route".
+	LocalAddr string
+	Interface string
+	SOMark    int
+	// ZeroCopy hands forwarded traffic to the kernel instead of copying it
+	// through this process. Off by default — see config.ZeroCopy.
+	ZeroCopy bool
+}
+
+// writeTuning emits the throughput/latency knobs shared by server and client.
+func (s TunnelSpec) writeTuning(p func(string, ...any)) {
+	if s.MSS > 0 {
+		p("mss = %d\n", s.MSS)
+	}
+	// The socket buffers size the datagram transports' UDP socket. They are no
+	// longer pinned on TCP sockets: doing that stops the kernel auto-tuning the
+	// window and caps throughput badly on a fast link. Set so_pin_tcp = true to
+	// get the old behaviour back.
+	if s.SoRcvBuf > 0 {
+		p("so_rcvbuf = %d\n", s.SoRcvBuf)
+	}
+	if s.SoSndBuf > 0 {
+		p("so_sndbuf = %d\n", s.SoSndBuf)
+	}
+}
+
+// writeKCP emits the KCP knobs. It is a no-op for every other transport, so a
+// tunnel that is not on KCP never carries stale KCP settings in its config.
+func (s TunnelSpec) writeKCP(p func(string, ...any)) {
+	if !isKCP(s.Transport) {
+		return
+	}
+	p("kcp_mtu = %d\n", s.KCPMTU)
+	p("kcp_interval = %d\n", s.KCPInterval)
+	p("kcp_resend = %d\n", s.KCPResend)
+	p("kcp_nodelay = %d\n", s.KCPNoDelay)
+	p("kcp_nocongestion = %d\n", s.KCPNoCongestion)
+	p("kcp_sndwnd = %d\n", s.KCPSndWnd)
+	p("kcp_rcvwnd = %d\n", s.KCPRcvWnd)
+	p("kcp_acknodelay = %t\n", s.KCPAckNoDelay)
+	p("kcp_datashards = %d\n", s.KCPDataShards)
+	p("kcp_parityshards = %d\n", s.KCPParityShards)
+}
+
+// writeSpoof emits the IP-spoofing knobs. A no-op for every other transport, so
+// a tunnel that is not on spoof never carries stale spoof settings.
+func (s TunnelSpec) writeSpoof(p func(string, ...any)) {
+	if s.Transport != "spoof" {
+		return
+	}
+	profile := s.SpoofProfile
+	if profile == "" {
+		profile = "udp"
+	}
+	p("spoof_profile = %q\n", profile)
+	if s.SpoofUplink != "" {
+		p("spoof_uplink = %q\n", s.SpoofUplink)
+	}
+	if s.SpoofDownlink != "" {
+		p("spoof_downlink = %q\n", s.SpoofDownlink)
+	}
+	if s.SpoofSrcIP != "" {
+		p("spoof_src_ip = %q\n", s.SpoofSrcIP)
+	}
+	if len(s.SpoofSrcPool) > 0 {
+		quoted := make([]string, len(s.SpoofSrcPool))
+		for i, ip := range s.SpoofSrcPool {
+			quoted[i] = fmt.Sprintf("%q", ip)
+		}
+		p("spoof_src_pool = [%s]\n", strings.Join(quoted, ", "))
+	}
+	if s.SpoofPeerIP != "" {
+		p("spoof_peer_ip = %q\n", s.SpoofPeerIP)
+	}
+	if s.SpoofDstIP != "" {
+		p("spoof_dst_ip = %q\n", s.SpoofDstIP)
+	}
+	if s.SpoofInterface != "" {
+		p("spoof_interface = %q\n", s.SpoofInterface)
+	}
+	if s.SpoofSockBuf > 0 {
+		p("spoof_sockbuf = %d\n", s.SpoofSockBuf)
+	}
+	if s.SpoofPeerSrcIP != "" {
+		p("spoof_peer_src_ip = %q\n", s.SpoofPeerSrcIP)
+	}
+	if s.SpoofICMPReply {
+		p("spoof_icmp_reply = true\n")
+	}
+	if s.SpoofMTU > 0 {
+		p("spoof_mtu = %d\n", s.SpoofMTU)
+	}
+	if s.SpoofTTLJitter {
+		p("spoof_ttl_jitter = true\n")
+	}
+	if s.SpoofRandomDSCP {
+		p("spoof_random_dscp = true\n")
+	}
+	if s.SpoofShufflePort {
+		p("spoof_shuffle_port = true\n")
+		if s.SpoofPortMin > 0 {
+			p("spoof_port_min = %d\n", s.SpoofPortMin)
+		}
+		if s.SpoofPortMax > 0 {
+			p("spoof_port_max = %d\n", s.SpoofPortMax)
+		}
+	}
+	if s.SpoofPadding {
+		p("spoof_padding = true\n")
+		if s.SpoofPaddingMax > 0 {
+			p("spoof_padding_max = %d\n", s.SpoofPaddingMax)
+		}
+	}
+	if s.SpoofFakeTLS {
+		p("spoof_fake_tls = true\n")
+	}
+	if s.SpoofPipe {
+		p("spoof_pipe = true\n")
+		addr := s.SpoofPipeAddr
+		if addr == "" {
+			addr = "127.0.0.1:51820"
+		}
+		p("spoof_pipe_addr = %q\n", addr)
+	}
+}
+
+// writePck emits the pck (packet-level TCP carrier) knobs. A no-op for every
+// other transport, so a tunnel that is not on pck never carries stale pck
+// settings. Every field is optional — the carrier discovers its own egress and
+// defaults to an ordinary-looking flow — so only non-empty values are written.
+func (s TunnelSpec) writePck(p func(string, ...any)) {
+	if s.Transport != "pck" {
+		return
+	}
+	if s.PckInterface != "" {
+		p("pck_interface = %q\n", s.PckInterface)
+	}
+	if s.PckGatewayMAC != "" {
+		p("pck_gateway_mac = %q\n", s.PckGatewayMAC)
+	}
+	if len(s.PckFlags) > 0 {
+		quoted := make([]string, len(s.PckFlags))
+		for i, f := range s.PckFlags {
+			quoted[i] = fmt.Sprintf("%q", f)
+		}
+		p("pck_flags = [%s]\n", strings.Join(quoted, ", "))
+	}
+}
+
+// isMux reports whether a transport multiplexes over SMUX.
+func isMux(t string) bool {
+	return t == "tcpmux" || t == "wsmux" || t == "wssmux" || t == "kcp" || t == "xdi" || t == "spoof" || t == "pck"
+}
+
+// isKCP reports whether a transport rides on KCP — over UDP (kcp), over ICMP
+// echo (xdi), or over forged raw IP (spoof). All three are tuned by the same
+// kcp_* knobs and the same presets.
+func isKCP(t string) bool {
+	return t == "kcp" || t == "xdi" || t == "spoof" || t == "pck"
+}
+
+// IsDatagram reports whether a transport carries datagrams (UDP/KCP), for
+// callers outside the package — a TCP probe against one is meaningless.
+func IsDatagram(t string) bool { return isDatagram(t) }
+
+// isDatagram reports whether a transport is carried in UDP datagrams. Such a
+// tunnel never shows up in the TCP listen table and cannot be probed with a
+// TCP connect, so every check that assumes TCP has to skip it.
+func isDatagram(t string) bool {
+	return t == "udp" || t == "kcp" || t == "xdi" || t == "quic" || t == "spoof" || t == "pck"
+}
+
+// supportsProxyProtocol reports whether a transport can prepend the PROXY
+// protocol header. The plain websocket and raw UDP transports cannot: one has
+// no place to put it in its framing, the other carries datagrams with no
+// connection to describe.
+func supportsProxyProtocol(t string) bool {
+	switch t {
+	case "tcp", "tcpmux", "kcp", "pck", "wsmux", "wssmux", "stealth", "quic":
+		return true
+	}
+	return false
+}
+
+// supportsMSS reports whether a transport carries its data as TCP segments, and
+// so can have their size clamped. The datagram transports (udp, kcp, xdi, quic)
+// size their packets with the KCP MTU instead and are not offered a clamp.
+func supportsMSS(t string) bool {
+	switch t {
+	case "tcp", "tcpmux", "stealth", "ws", "wss", "wsmux", "wssmux":
+		return true
+	}
+	return false
+}
+
+// isWS reports whether a transport rides over websocket.
+func isWS(t string) bool {
+	return t == "ws" || t == "wss" || t == "wsmux" || t == "wssmux"
+}
+
+// needsTLS reports whether a transport terminates TLS on the server and
+// therefore requires a certificate/key pair.
+func needsTLS(t string) bool {
+	return t == "wss" || t == "wssmux"
+}
+
+// isReverseProxy reports whether t is one of night-watcher's own reverse-proxy
+// tunnels (frp/rathole and their UDP variants), which support the stealth wrap.
+func isReverseProxy(t string) bool {
+	switch t {
+	case "frp", "frpu", "rathole", "ratholeu":
+		return true
+	}
+	return false
+}
+
+// validTransport reports whether t is one of the engine's supported transports.
+func validTransport(t string) bool {
+	switch t {
+	case "tcp", "tcpmux", "udp", "kcp", "quic", "ws", "wss", "wsmux", "wssmux", "stealth", "xdi", "spoof", "pck", "frp", "frpu", "rathole", "ratholeu":
+		return true
+	}
+	return false
+}
+
+// Render returns the TOML representation of the tunnel.
+func (s TunnelSpec) Render() string {
+	var b strings.Builder
+	p := func(format string, a ...any) { fmt.Fprintf(&b, format, a...) }
+
+	b.WriteString("# Generated by night-watcher — do not edit while the service is running.\n")
+	p("# name = \"%s\"\n\n", s.Name)
+
+	if s.Role == "server" {
+		b.WriteString("[server]\n")
+		p("bind_addr = %q\n", s.BindAddr)
+		p("transport = %q\n", s.Transport)
+		if s.Preset != "" {
+			p("preset = %q\n", s.Preset)
+		}
+		p("token = %q\n", s.Token)
+		if s.Obfs != "" {
+			p("obfs = %q\n", s.Obfs)
+			if s.Obfs == "tls" {
+				if s.TLSSni != "" {
+					p("tls_sni = %q\n", s.TLSSni)
+				}
+				// A real Let's Encrypt certificate instead of the self-signed one.
+				if s.ACMEDomain != "" {
+					p("acme_domain = %q\n", s.ACMEDomain)
+					if s.ACMEEmail != "" {
+						p("acme_email = %q\n", s.ACMEEmail)
+					}
+				}
+			}
+		}
+		p("channel_size = %d\n", s.ChannelSize)
+		p("keepalive_period = %d\n", s.KeepAlive)
+		p("nodelay = %t\n", s.Nodelay)
+		p("heartbeat = %d\n", s.Heartbeat)
+		p("log_level = %q\n", s.LogLevel)
+		if s.LogFormat != "" {
+			p("log_format = %q\n", s.LogFormat)
+		}
+		s.writeTuning(p)
+		s.writeKCP(p)
+		s.writeSpoof(p)
+		s.writePck(p)
+		if s.Transport == "tcp" {
+			// accept_udp is only honoured by the plain TCP transport in the engine.
+			p("accept_udp = %t\n", s.AcceptUDP)
+		}
+		if needsTLS(s.Transport) {
+			p("tls_cert = %q\n", s.TLSCert)
+			p("tls_key = %q\n", s.TLSKey)
+			// Emitted only when in use, so a config written before Let's
+			// Encrypt existed stays byte-identical after an edit.
+			if s.ACMEDomain != "" {
+				p("acme_domain = %q\n", s.ACMEDomain)
+				if s.ACMEEmail != "" {
+					p("acme_email = %q\n", s.ACMEEmail)
+				}
+			}
+			// The server end also has to be told to accept the raw token, or it
+			// keeps demanding the bound proof the fronted client can no longer
+			// send.
+			if s.SimpleAuth {
+				p("simple_auth = true\n")
+			}
+		}
+		if isMux(s.Transport) {
+			p("mux_con = %d\n", s.MuxCon)
+			p("mux_version = %d\n", s.MuxVersion)
+			p("mux_framesize = %d\n", s.MuxFrameSize)
+			p("mux_recievebuffer = %d\n", s.MuxRecvBuffer)
+			p("mux_streambuffer = %d\n", s.MuxStreamBuffer)
+		}
+		if supportsProxyProtocol(s.Transport) {
+			p("proxy_protocol = %t\n", s.ProxyProtocol)
+		}
+		if s.ZeroCopy {
+			p("zero_copy = true\n")
+		}
+		if s.MaxConnections > 0 {
+			p("max_connections = %d\n", s.MaxConnections)
+		}
+		if s.BandwidthMbps > 0 {
+			p("bandwidth_mbps = %d\n", s.BandwidthMbps)
+		}
+		p("sniffer = %t\n", s.Sniffer)
+		if s.WebPort > 0 {
+			p("web_port = %d\n", s.WebPort)
+			p("web_bind = %q\n", monitorBind(s.WebBind))
+		}
+		b.WriteString("ports = [\n")
+		for _, port := range s.Ports {
+			p("    %q,\n", port)
+		}
+		b.WriteString("]\n")
+		return b.String()
+	}
+
+	// client
+	b.WriteString("[client]\n")
+	p("remote_addr = %q\n", s.RemoteAddr)
+	if len(s.FallbackAddrs) > 0 {
+		b.WriteString("fallback_addrs = [\n")
+		for _, a := range s.FallbackAddrs {
+			p("    %q,\n", a)
+		}
+		b.WriteString("]\n")
+	}
+	p("transport = %q\n", s.Transport)
+	if s.Preset != "" {
+		p("preset = %q\n", s.Preset)
+	}
+	p("token = %q\n", s.Token)
+	if s.Obfs != "" {
+		p("obfs = %q\n", s.Obfs)
+		if s.Obfs == "tls" && s.TLSSni != "" {
+			p("tls_sni = %q\n", s.TLSSni)
+		}
+	}
+	p("connection_pool = %d\n", s.ConnectionPool)
+	p("aggressive_pool = %t\n", s.AggressivePool)
+	p("keepalive_period = %d\n", s.KeepAlive)
+	p("nodelay = %t\n", s.Nodelay)
+	if s.LoadBalance {
+		p("load_balance = true\n")
+	}
+	if s.HealthFailover {
+		p("health_failover = true\n")
+	}
+	p("retry_interval = %d\n", 3)
+	p("dial_timeout = %d\n", 10)
+	p("log_level = %q\n", s.LogLevel)
+	if s.LogFormat != "" {
+		p("log_format = %q\n", s.LogFormat)
+	}
+	s.writeTuning(p)
+	s.writeKCP(p)
+	s.writeSpoof(p)
+	s.writePck(p)
+	if isWS(s.Transport) && s.EdgeIP != "" {
+		p("edge_ip = %q\n", s.EdgeIP)
+	}
+	if needsTLS(s.Transport) && s.SimpleAuth {
+		p("simple_auth = true\n")
+	}
+	if s.Proxy != "" {
+		p("proxy = %q\n", s.Proxy)
+	}
+	if s.LocalAddr != "" {
+		p("local_addr = %q\n", s.LocalAddr)
+	}
+	if s.Interface != "" {
+		p("interface = %q\n", s.Interface)
+	}
+	if s.SOMark != 0 {
+		p("so_mark = %d\n", s.SOMark)
+	}
+	if s.ZeroCopy {
+		p("zero_copy = true\n")
+	}
+	if isMux(s.Transport) {
+		p("mux_session = %d\n", s.MuxCon)
+		p("mux_version = %d\n", s.MuxVersion)
+		p("mux_framesize = %d\n", s.MuxFrameSize)
+		p("mux_recievebuffer = %d\n", s.MuxRecvBuffer)
+		p("mux_streambuffer = %d\n", s.MuxStreamBuffer)
+	}
+	p("sniffer = %t\n", s.Sniffer)
+	if s.WebPort > 0 {
+		p("web_port = %d\n", s.WebPort)
+		p("web_bind = %q\n", monitorBind(s.WebBind))
+	}
+	return b.String()
+}
+
+// monitorBind resolves the sniffer/monitor bind address written to a config:
+// an unset value defaults to loopback, because the page has no authentication
+// and binding it to all interfaces exposes the host's stats (and, with the
+// sniffer on, every forwarded port's usage) to the network.
+func monitorBind(configured string) string {
+	if configured == "" {
+		return "127.0.0.1"
+	}
+	return configured
+}
+
+// Save writes the config file, the systemd unit, reloads systemd and starts
+// the tunnel. It returns the service name on success.
+func (s TunnelSpec) Save() (string, error) {
+	if err := os.MkdirAll(app.ConfigDir, 0755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(app.ConfigPath(s.Name), []byte(s.Render()), 0644); err != nil {
+		return "", err
+	}
+	if err := writeUnit(s.Name); err != nil {
+		return "", err
+	}
+	if err := DaemonReload(); err != nil {
+		return "", err
+	}
+	service := app.ServiceName(s.Name)
+	if err := StartService(service); err != nil {
+		return service, err
+	}
+	return service, nil
+}

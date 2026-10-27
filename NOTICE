@@ -1,0 +1,55 @@
+Arange-tun
+Copyright (C) 2026 Amin Mohammadi (mahdi-byte64). All rights reserved.
+
+Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+See the LICENSE file for the full text.
+
+--------------------------------------------------------------------------------
+Third-party attribution (required by AGPL-3.0)
+--------------------------------------------------------------------------------
+
+Portions of the tunnel data-plane are derived from prior AGPL-3.0 / GPL-3.0
+open-source work. This single line is retained only to satisfy the copyleft
+attribution requirement of that license; all product branding, CLI, web UI, and
+management code are original to Arange-tun by Amin Mohammadi.
+
+The built-in "Rathole v2" tunnel (internal/rathole) is a Go reimplementation of
+the rathole reverse-proxy protocol by rapiz1 and contributors
+(https://github.com/rapiz1/rathole), which is licensed under the Apache License
+2.0. No rathole source code is copied; the protocol — its control/data-channel
+handshake, message framing, and forwarding design — was reimplemented in Go from
+the published specification and source.
+
+The "IP Spoofing" transport (the spoof_* config keys; the spoof carrier in
+internal/utils/network/spoof*.go and the KCP integration in kcp.go; the
+per-side spoofpipe transports; the spoof tester in internal/spooftest and
+internal/manage/spooftest.go) is derived from Backpack by Amin Mohammadi
+(AminMGMT) — https://github.com/AminMGMT/backpack — which is licensed under the
+GNU Affero General Public License v3.0, the same licence as this project. The
+code was ported with attribution under that licence; the tunnel token salts and
+module paths were adapted to Arange-tun.
+
+The "TCP + PCK" transport (the pck_* config keys; the packet-level TCP carrier
+in internal/utils/network/pck*.go and its KCP integration in kcp.go; the
+transport wiring in server/client and internal/manage) is likewise derived from
+Backpack by Amin Mohammadi (AminMGMT), under the same AGPL-3.0 licence and with
+attribution. It carries KCP inside hand-built TCP segments read and written
+through a packet socket. The client source-port derivation salt and the iptables
+comment tag were rebranded to Arange-tun.
+
+The multi-exit health failover and scoring (health_failover; the steering in
+internal/utils/network/endpoints.go and internal/utils/network/healthscore.go;
+internal/manage/exithealth.go) and the game-latency tester (internal/manage/
+game.go and gamemenu.go, and RecommendFEC in internal/manage/benchmark.go) are
+also derived from Backpack by Amin Mohammadi (AminMGMT), under the same AGPL-3.0
+licence and with attribution.
+
+The sniffer/monitor bind-address handling (web_bind; internal/web/monitorhttp.go
+and the monitorBind default) is likewise derived from Backpack by Amin Mohammadi
+(AminMGMT), under the same AGPL-3.0 licence and with attribution.
+
+The "Throughput" performance preset (PresetThroughput in internal/manage/
+preset.go, and its KCP-family gating in setup/edit/create) is derived from
+Backpack by Amin Mohammadi (AminMGMT), under the same AGPL-3.0 licence and with
+attribution; the preset's tuning numbers were re-fitted to this fork's own
+Balance/Turbo/Aggressive baselines.
