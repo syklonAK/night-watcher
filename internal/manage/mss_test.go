@@ -23,7 +23,12 @@ func TestSupportsMSS(t *testing.T) {
 
 // buildSpec must apply the clamp to a websocket tunnel — the regression this
 // whole change fixes was that WS carried the value but never put it on a socket.
+// Building a wss server generates a self-signed certificate under /etc, so the
+// check needs a writable config directory (skipped for non-root CI runners).
 func TestBuildSpecAppliesMSSOnWebSocket(t *testing.T) {
+	if !configDirWritable() {
+		t.Skip("config directory not writable (run as root to generate certificates)")
+	}
 	s, err := buildSpec(TunnelRequest{
 		Name: "wsm", Role: "server", Transport: "wss",
 		Port: "443", Ports: []string{"443"},

@@ -37,6 +37,21 @@ func (f *failRunner) count() int {
 
 var _ CommandRunner = (&failRunner{}).Run
 
+// blockConfigWrite makes the config path unwritable in a way that works on
+// every platform: edge.json is replaced by a *directory*, so the atomic write
+// cannot create its temp sibling and MkdirAll cannot help. (A read-only file
+// is not enough — Linux rename replaces it; chmod on a directory does not deny
+// writes on Windows.)
+func blockConfigWrite(t *testing.T, dir string) {
+	t.Helper()
+	p := configPath(dir)
+	os.Remove(p)
+	if e := os.Mkdir(p, 0755); e != nil {
+		t.Skipf("cannot block config path: %v", e)
+	}
+	t.Cleanup(func() { os.Remove(p) })
+}
+
 // The rollback after a failed persist must not be swallowed: if rolling the
 // firewall back also fails, the caller has to learn that the live rules and
 // the config file now disagree.
@@ -64,11 +79,8 @@ func TestManagerSaveReportsFailedRollback(t *testing.T) {
 		t.Fatalf("enabling firewall: %v", e)
 	}
 
-	// Step 2: make the config file unwritable so the next persist fails…
-	if e := os.Chmod(configPath(dir), 0400); e != nil {
-		t.Skip("cannot make config read-only:", e)
-	}
-	t.Cleanup(func() { os.Chmod(configPath(dir), 0600) })
+	// Step 2: make the config path unwritable so the next persist fails.
+	blockConfigWrite(t, dir)
 
 	// …and fail the runner from the rollback call onward: calls 1–3 apply the
 	// new rules, call 4+ is the rollback.
@@ -81,7 +93,7 @@ func TestManagerSaveReportsFailedRollback(t *testing.T) {
 	next.Firewall.PreventDNSLeaks = true
 	e = m.Save(next)
 	if e == nil {
-		t.Fatal("save with unwritable config succeeded")
+		t.Fatal("save with blocked config path succeeded")
 	}
 	if !strings.Contains(e.Error(), "rollback") {
 		t.Fatalf("rollback failure not reported: %v", e)
